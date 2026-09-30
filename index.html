@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>档小开 · 南开大学档案馆 AI 查档助手</title>
+<style>
+  :root {
+    --purple: #5b2c83;
+    --purple-light: #7c4da3;
+    --bg: #f5f3f8;
+    --bubble-ai: #ffffff;
+    --bubble-user: #5b2c83;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    display: flex; flex-direction: column;
+  }
+  header {
+    background: linear-gradient(135deg, var(--purple), var(--purple-light));
+    color: #fff; padding: 14px 16px;
+    box-shadow: 0 2px 8px rgba(91,44,131,.25);
+    flex-shrink: 0;
+  }
+  header h1 { font-size: 17px; font-weight: 600; }
+  header p { font-size: 12px; opacity: .85; margin-top: 2px; }
+  #chat {
+    flex: 1; overflow-y: auto; padding: 16px 12px;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .msg { max-width: 86%; padding: 10px 14px; border-radius: 14px;
+    font-size: 15px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+  .msg.ai { align-self: flex-start; background: var(--bubble-ai); color: #333;
+    border-top-left-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+  .msg.user { align-self: flex-end; background: var(--bubble-user); color: #fff;
+    border-top-right-radius: 4px; }
+  .msg.ai a { color: var(--purple); word-break: break-all; }
+  .typing { display: inline-block; }
+  .typing::after { content: "▍"; animation: blink 1s infinite; color: var(--purple); }
+  @keyframes blink { 50% { opacity: 0; } }
+  #suggestions { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 12px 8px; flex-shrink: 0; }
+  #suggestions button {
+    border: 1px solid var(--purple); color: var(--purple); background: #fff;
+    border-radius: 16px; padding: 6px 12px; font-size: 13px; cursor: pointer;
+  }
+  #suggestions button:active { background: var(--purple); color: #fff; }
+  footer { flex-shrink: 0; display: flex; gap: 8px; padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+    background: #fff; box-shadow: 0 -1px 4px rgba(0,0,0,.05); }
+  #input {
+    flex: 1; border: 1px solid #d8d2e3; border-radius: 20px;
+    padding: 10px 16px; font-size: 15px; outline: none; resize: none;
+    font-family: inherit; max-height: 100px; line-height: 1.4;
+  }
+  #input:focus { border-color: var(--purple); }
+  #send {
+    border: none; background: var(--purple); color: #fff; border-radius: 20px;
+    padding: 0 18px; font-size: 15px; cursor: pointer; flex-shrink: 0;
+  }
+  #send:disabled { background: #c5b8d6; }
+  .error { color: #c0392b; font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>档小开</h1>
+  <p>南开大学档案馆 AI 查档助手 · 无需登录，直接提问</p>
+</header>
+<div id="chat"></div>
+<div id="suggestions">
+  <button>我要查本科成绩单，需要准备哪些材料？</button>
+  <button>我是海外校友，怎么远程查档？</button>
+  <button>档案可以找人代办吗？需要什么手续？</button>
+</div>
+<footer>
+  <textarea id="input" rows="1" placeholder="请输入您的问题…"></textarea>
+  <button id="send">发送</button>
+</footer>
+
+<script>
+// ===== 配置 =====
+const API_BASE = "https://coze.nankai.edu.cn/api/proxy/api/v1";
+// 敏感：API Key（演示用途内嵌，正式部署建议改走服务端转发）
+const API_KEY = "dau9f0t4shh989l31vkg";
+
+// ===== 每个浏览器一个稳定访客 ID（平台按此计为一位互动用户）=====
+let USER_ID = localStorage.getItem("dxk_uid");
+if (!USER_ID) {
+  USER_ID = "web-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+  localStorage.setItem("dxk_uid", USER_ID);
+}
+// UserID 长度限制 1-20
+USER_ID = USER_ID.slice(0, 20);
+
+let conversationId = null;
+let sending = false;
+
+const chatEl = document.getElementById("chat");
+const inputEl = document.getElementById("input");
+const sendEl = document.getElementById("send");
+
+function addMsg(cls, text) {
+  const div = document.createElement("div");
+  div.className = "msg " + cls;
+  div.textContent = text;
+  chatEl.appendChild(div);
+  chatEl.scrollTop = chatEl.scrollHeight;
+  return div;
+}
+
+function linkify(el, text) {
+  el.textContent = "";
+  const parts = text.split(/(https?:\/\/[^\s，。）)】]+|[\w.+-]+@[\w.-]+\.[a-z]{2,})/gi);
+  parts.forEach(p => {
+    if (/^https?:\/\//i.test(p)) {
+      const a = document.createElement("a");
+      a.href = p; a.target = "_blank"; a.rel = "noopener"; a.textContent = p;
+      el.appendChild(a);
+    } else if (/^[\w.+-]+@[\w.-]+\.[a-z]{2,}$/i.test(p)) {
+      const a = document.createElement("a");
+      a.href = "mailto:" + p; a.textContent = p;
+      el.appendChild(a);
+    } else {
+      el.appendChild(document.createTextNode(p));
+    }
+  });
+}
+
+async function ensureConversation() {
+  if (conversationId) return conversationId;
+  const res = await fetch(API_BASE + "/create_conversation", {
+    method: "POST",
+    headers: { "Apikey": API_KEY, "Content-Type": "application/json" },
+    body: JSON.stringify({ UserID: USER_ID })
+  });
+  const data = await res.json();
+  const cid = data && data.Conversation && data.Conversation.AppConversationID;
+  if (!cid) throw new Error("创建会话失败: " + JSON.stringify(data).slice(0, 200));
+  conversationId = cid;
+  return cid;
+}
+
+async function sendQuery(q, bubble) {
+  const res = await fetch(API_BASE + "/chat_query", {
+    method: "POST",
+    headers: { "Apikey": API_KEY, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      AppConversationID: conversationId,
+      Query: q,
+      ResponseMode: "streaming",
+      UserID: USER_ID
+    })
+  });
+  if (!res.ok || !res.body) {
+    const errText = await res.text().catch(() => "");
+    throw new Error("HTTP " + res.status + " " + errText.slice(0, 300));
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "", full = "";
+  const append = piece => {
+    if (piece) { full += piece; linkify(bubble, full); chatEl.scrollTop = chatEl.scrollHeight; }
+  };
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const events = buf.split("\n\n");
+    buf = events.pop();
+    for (const ev of events) {
+      for (const line of ev.split("\n")) {
+        const t = line.trim();
+        if (!t.startsWith("data:")) continue;
+        // 实测格式为 "data:data: {...}"，剥掉 SSE 前缀后还有一层 data:
+        let payload = t.slice(5).trim();
+        if (payload.startsWith("data:")) payload = payload.slice(5).trim();
+        if (!payload || payload === "[DONE]") continue;
+        let obj;
+        try { obj = JSON.parse(payload); } catch (e) { continue; }
+        if (obj && obj.ResponseMetadata && obj.ResponseMetadata.Error) {
+          throw new Error((obj.ResponseMetadata.Error.Message || "服务返回错误"));
+        }
+        // 只拼接 message 事件的增量文本，忽略 qa_retrieve 等过程事件
+        if (obj.event === "message" && typeof obj.answer === "string") append(obj.answer);
+        if (obj.event === "message_end" && !full && typeof obj.answer === "string") append(obj.answer);
+      }
+    }
+  }
+  if (!full) full = "（未收到回答内容，请重试）";
+  linkify(bubble, full);
+}
+
+async function send(text) {
+  text = (text || "").trim();
+  if (!text || sending) return;
+  sending = true;
+  sendEl.disabled = true;
+  addMsg("user", text);
+  const bubble = addMsg("ai", "");
+  bubble.innerHTML = '<span class="typing"></span>';
+  try {
+    await ensureConversation();
+    await sendQuery(text, bubble);
+  } catch (e) {
+    bubble.classList.add("error");
+    bubble.textContent = "出错了：" + e.message + "（请稍后重试）";
+  } finally {
+    sending = false;
+    sendEl.disabled = false;
+    inputEl.focus();
+  }
+}
+
+sendEl.addEventListener("click", () => { send(inputEl.value); inputEl.value = ""; });
+inputEl.addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(inputEl.value); inputEl.value = ""; }
+});
+document.querySelectorAll("#suggestions button").forEach(b => {
+  b.addEventListener("click", () => { inputEl.value = ""; send(b.textContent); });
+});
+
+addMsg("ai", "你好，我是「档小开」，南开大学档案馆的 AI 查档助手。我能帮你查清各类档案「能不能查、在哪儿查、要什么材料、走什么流程、多久能办好」，也支持异地与海外校友的远程查档咨询。直接说出你的需求就可以，例如：我想查本科成绩单，需要准备哪些材料？");
+</script>
+</body>
+</html>
